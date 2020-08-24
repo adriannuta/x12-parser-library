@@ -17,6 +17,11 @@ class X12Parser
     private $reader;
     private $segmentFunction;
 
+    protected $segmentDelimiter;
+    protected $dataElementDelimiter;
+    protected $repetitionDelimiter;
+    protected $subRepetitionDelimiter;
+
     /**
      * X12Parser constructor.
      * @param string $rawX12
@@ -53,19 +58,13 @@ class X12Parser
 
         // Define some things for parsing the file
         $x12 = new X12();
-        $segmentDelimiter = null;
-        $dataElementDelimiter = null;
-        $repetitionDelimiter = null;
-        $subRepetitionDelimiter = null;
-        $version = null;
-
         // We need to parse the delimiters of the first ISA before we can do anything
-        if (!$this->parseDelimiters($segmentDelimiter, $dataElementDelimiter, $repetitionDelimiter, $subRepetitionDelimiter, $version)) {
+        if (!$this->parseDelimiters()) {
             throw new Exception('Could not parse the delimiters of the first ISA.');
         }
 
         // Read through the segments in the file
-        while (($segmentString = $this->reader->next($segmentDelimiter)) !== false) {
+        while (($segmentString = $this->reader->next($this->segmentDelimiter)) !== false) {
             // If a segment Function is set, execute it
             if (isset($this->segmentFunction)) {
                 $segmentFunction = $this->segmentFunction;
@@ -78,7 +77,7 @@ class X12Parser
             }
 
             // Get the data elements in this segment
-            $dataElements = explode($dataElementDelimiter, $segmentString);
+            $dataElements = explode($this->dataElementDelimiter, $segmentString);
 
             // Check for repetition delimiters... If there are any, split the element into an array
             for ($i = 1; $i < count($dataElements); $i++) {
@@ -86,140 +85,24 @@ class X12Parser
                     // Skip this check for ISA11 and ISA16
                     continue;
                 }
-                if (strpos($dataElements[$i], $repetitionDelimiter) !== false) {
-                    $dataElements[$i] = explode($repetitionDelimiter, $dataElements[$i]);
+                if (strpos($dataElements[$i], $this->repetitionDelimiter) !== false) {
+                    $dataElements[$i] = explode($this->repetitionDelimiter, $dataElements[$i]);
 
                     // Check for sub-repetition delimiters... If there are any, split the sub element into an array
                     for ($j = 0; $j < count($dataElements[$i]); $j++) {
-                        if (strpos($dataElements[$i][$j], $subRepetitionDelimiter) !== false) {
-                            $dataElements[$i][$j] = explode($subRepetitionDelimiter, $dataElements[$i][$j]);
+                        if (strpos($dataElements[$i][$j], $this->subRepetitionDelimiter) !== false) {
+                            $dataElements[$i][$j] = explode($this->subRepetitionDelimiter, $dataElements[$i][$j]);
                         }
                     }
                 }
 
                 // Check for any lingering sub-repetition elements (this happens when you have sub-repetition elements with only one parent repetition element)
-                if (is_string($dataElements[$i]) && strpos($dataElements[$i], $subRepetitionDelimiter) !== false) {
-                    $dataElements[$i] = [explode($subRepetitionDelimiter, $dataElements[$i])];
+                if (is_string($dataElements[$i]) && strpos($dataElements[$i], $this->subRepetitionDelimiter) !== false) {
+                    $dataElements[$i] = [explode($this->subRepetitionDelimiter, $dataElements[$i])];
                 }
             }
 
-            // Handle the parsed segment
-            switch ($dataElements[0]) {
-
-                case 'ISA':
-                    $x12->ISA[] = new ISA($dataElements, $segmentDelimiter, $dataElementDelimiter, $repetitionDelimiter, $subRepetitionDelimiter);
-                    break;
-
-
-                case 'IEA':
-                    /** @var ISA $isa */
-                    $isa = end($x12->ISA);
-
-                    // Add this IEA to the ISA
-                    $isa->IEA = new Segment($dataElements);
-
-                    // Try to re-parse the delimiters, in case this is a second ISA in the same file
-                    if (!$this->parseDelimiters($segmentDelimiter, $dataElementDelimiter, $repetitionDelimiter, $subRepetitionDelimiter)) {
-
-                        // if delimiters couldn't be found... we should be done parsing this file
-                        break;
-                    }
-                    break;
-
-
-                case 'GS':
-                    /** @var ISA $isa */
-                    $isa = end($x12->ISA);
-
-                    // Add this GS to the ISA
-                    $isa->GS[] = new GS($dataElements);
-                    break;
-
-
-                case 'GE':
-                    /** @var ISA $isa */
-                    $isa = end($x12->ISA);
-
-                    /** @var GS $gs */
-                    $gs = end($isa->GS);
-
-                    // Add this GE to the GS
-                    $gs->GE = new Segment($dataElements);
-                    break;
-
-
-                case 'ST':
-                    /** @var ISA $isa */
-                    $isa = end($x12->ISA);
-
-                    /** @var GS $gs */
-                    $gs = end($isa->GS);
-
-                    // Add this ST to the GS
-                    $gs->ST[] = new ST($dataElements);
-                    break;
-
-
-                case 'SE':
-                    /** @var ISA $isa */
-                    $isa = end($x12->ISA);
-
-                    /** @var GS $gs */
-                    $gs = end($isa->GS);
-
-                    /** @var ST $st */
-                    $st = end($gs->ST);
-
-                    // Add this SE to the ST
-                    $st->SE = new Segment($dataElements);
-                    break;
-
-
-                case 'HL':
-                    /** @var ISA $isa */
-                    $isa = end($x12->ISA);
-
-                    /** @var GS $gs */
-                    $gs = end($isa->GS);
-
-                    /** @var ST $st */
-                    $st = end($gs->ST);
-
-                    // Create the HL segment
-                    $hl = new HL($dataElements);
-
-                    // Determine which ST or HL segment this HL belongs to, and then add it
-                    $hlParentId = '';
-                    if (isset($hl->HL02)) {
-                        $hlParentId = trim($hl->HL02);
-                    }
-                    $parent = $st;
-                    if (strlen($hlParentId) > 0) {
-                        $parent = $this->findHLParent($st->HL, $hlParentId);
-                        if ($parent === null) {
-                            throw new Exception("HL parent with ID of {$hlParentId} could not be found.");
-                        }
-                    }
-                    $parent->HL[] = $hl;
-
-                    break;
-
-
-                case 'TA1':
-                    /** @var ISA $isa */
-                    $isa = end($x12->ISA);
-
-                    // Add this TA1 to the ISA
-                    $isa->TA1 = new Segment($dataElements);
-                    break;
-
-
-                default:
-                    // This is some other segment that we don't account for above, so handle it now...
-                    $segment = new Segment($dataElements);
-                    $this->addSegmentAttribute($x12, $segment);
-                    break;
-            }
+            $this->resolveSegment($dataElements, $x12);
 
             // Logging
             $segmentCount++;
@@ -255,13 +138,9 @@ class X12Parser
      * function fails to parse out the delimiters, then `false` will be returned.
      * On success, this function will return true and set all of the delimiters.
      *
-     * @param $segmentDelimiter
-     * @param $dataElementDelimiter
-     * @param $repetitionDelimiter
-     * @param $subRepetitionDelimiter
      * @return bool
      */
-    private function parseDelimiters(&$segmentDelimiter, &$dataElementDelimiter, &$repetitionDelimiter, &$subRepetitionDelimiter)
+    private function parseDelimiters()
     {
         // The spec is supposed to be:
         // The repetition separator is byte 83
@@ -325,10 +204,10 @@ class X12Parser
             && strlen($segment) === 1
         ) {
             // These are set by reference, so the variables passed to this function get set here
-            $segmentDelimiter = $segment;
-            $dataElementDelimiter = $dataEl;
-            $repetitionDelimiter = $rep;
-            $subRepetitionDelimiter = $subRep;
+            $this->segmentDelimiter = $segment;
+            $this->dataElementDelimiter = $dataEl;
+            $this->repetitionDelimiter = $rep;
+            $this->subRepetitionDelimiter = $subRep;
             return true;
         }
 
@@ -432,6 +311,121 @@ class X12Parser
             }
         } else {
             return "{$hours} hrs {$minutes} min {$seconds} sec";
+        }
+    }
+
+    protected function resolveSegment($dataElements, $x12){
+        switch ($dataElements[0]) {
+
+            case 'ISA':
+                $x12->ISA[] = new ISA($dataElements, $this->segmentDelimiter, $this->dataElementDelimiter, $this->repetitionDelimiter, $this->subRepetitionDelimiter);
+                break;
+
+            case 'IEA':
+                /** @var ISA $isa */
+                $isa = end($x12->ISA);
+
+                // Add this IEA to the ISA
+                $isa->IEA = new Segment($dataElements);
+
+                // Try to re-parse the delimiters, in case this is a second ISA in the same file
+                if (!$this->parseDelimiters()) {
+                    // if delimiters couldn't be found... we should be done parsing this file
+                    break;
+                }
+                break;
+
+
+            case 'GS':
+                /** @var ISA $isa */
+                $isa = end($x12->ISA);
+
+                // Add this GS to the ISA
+                $isa->GS[] = new GS($dataElements);
+                break;
+
+
+            case 'GE':
+                /** @var ISA $isa */
+                $isa = end($x12->ISA);
+
+                /** @var GS $gs */
+                $gs = end($isa->GS);
+
+                // Add this GE to the GS
+                $gs->GE = new Segment($dataElements);
+                break;
+            case 'ST':
+                /** @var ISA $isa */
+                $isa = end($x12->ISA);
+
+                /** @var GS $gs */
+                $gs = end($isa->GS);
+
+                // Add this ST to the GS
+                $gs->ST[] = new ST($dataElements);
+                break;
+
+
+            case 'SE':
+                /** @var ISA $isa */
+                $isa = end($x12->ISA);
+
+                /** @var GS $gs */
+                $gs = end($isa->GS);
+
+                /** @var ST $st */
+                $st = end($gs->ST);
+
+                // Add this SE to the ST
+                $st->SE = new Segment($dataElements);
+                break;
+
+
+            case 'HL':
+                /** @var ISA $isa */
+                $isa = end($x12->ISA);
+
+                /** @var GS $gs */
+                $gs = end($isa->GS);
+
+                /** @var ST $st */
+                $st = end($gs->ST);
+
+                // Create the HL segment
+                $hl = new HL($dataElements);
+
+                // Determine which ST or HL segment this HL belongs to, and then add it
+                $hlParentId = '';
+                if (isset($hl->HL02)) {
+                    $hlParentId = trim($hl->HL02);
+                }
+                $parent = $st;
+                if (strlen($hlParentId) > 0) {
+                    $parent = $this->findHLParent($st->HL, $hlParentId);
+                    if ($parent === null) {
+                        throw new Exception("HL parent with ID of {$hlParentId} could not be found.");
+                    }
+                }
+                $parent->HL[] = $hl;
+
+                break;
+
+
+            case 'TA1':
+                /** @var ISA $isa */
+                $isa = end($x12->ISA);
+
+                // Add this TA1 to the ISA
+                $isa->TA1 = new Segment($dataElements);
+                break;
+
+
+            default:
+                // This is some other segment that we don't account for above, so handle it now...
+                $segment = new Segment($dataElements);
+                $this->addSegmentAttribute($x12, $segment);
+                break;
         }
     }
 
